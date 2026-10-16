@@ -135,8 +135,10 @@ headers and a separate real CPU throttle. Traces, process checks and transport
 deadlines keep real time. No ROS reference falls back to wall time.
 
 A changed or unavailable reference rejects queued navigation and cancels its
-active action. Late goal acceptance is canceled and late results cannot report
-success in the new generation. The guard uses a real timer to publish zero on
+active action. Sent and accepted goals retain their action handles until a
+terminal result confirms they stopped; cancellation failures remain visible
+and are retried. Late goal acceptance is canceled, and an interrupted goal
+cannot report success after reference or worker recovery. The guard uses a real timer to publish zero on
 reference interruption or missing commands, including during a simulation pause.
 
 Navigation generates only its Atlas MCP bindings on every deployment target.

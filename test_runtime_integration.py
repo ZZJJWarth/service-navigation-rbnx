@@ -47,6 +47,9 @@ class ReferenceNavigationTest(unittest.TestCase):
         handle = Mock(accepted=True)
         b._goal_response_cb(Mock(result=lambda: handle), run)
         handle.cancel_goal_async.assert_called_once()
+        self.assertEqual(b._status_impl(run)["state"], "RUNNING")
+        self.assertIs(b._goal_handles[run], handle)
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
         self.assertEqual(b._status_impl(run)["state"], "FAILED")
 
     def test_stale_result_and_old_generation_request_are_rejected(self):
@@ -81,16 +84,50 @@ class ReferenceNavigationTest(unittest.TestCase):
         self.assertTrue(b._cancel_impl(run.replace("-", "").upper())["accepted"])
         handle.cancel_goal_async.assert_called_once()
 
-    def test_late_acceptance_restores_goal_speed_and_releases_receipt(self):
+    def test_late_acceptance_retains_ownership_until_terminal_result(self):
         b = self.bridge
         run = b._navigate_impl(self.goal)["run_id"]
         self.reading = (0, 2, 1)
         handle = Mock(accepted=True)
         with patch.object(b, "_restore_speed_after_run") as restore:
             b._goal_response_cb(Mock(result=lambda: handle), run)
+            restore.assert_not_called()
+            self.assertIn(run, b._goal_references)
+            self.assertIs(b._goal_handles[run], handle)
+            handle.cancel_goal_async.assert_called_once()
+            b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
             restore.assert_called_once_with(run)
         self.assertNotIn(run, b._goal_references)
-        handle.cancel_goal_async.assert_called_once()
+        self.assertNotIn(run, b._goal_handles)
+
+    def test_interrupted_active_goal_does_not_claim_terminal_after_cancel_failure(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        handle = Mock(cancel_goal_async=Mock(side_effect=RuntimeError("no reply")))
+        b._goal_handles[run] = handle
+        b._goal_states[run]["state"] = "RUNNING"
+        self.reading = (0, 2, 1)
+        b._interrupt_old_goals()
+        self.assertEqual(b._status_impl(run)["state"], "RUNNING")
+        self.assertIs(b._goal_handles[run], handle)
+        self.assertFalse(b._cancel_impl(run)["accepted"])
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=5)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
+
+    def test_temporary_reference_loss_stays_interrupted_after_recovery(self):
+        b = self.bridge
+        run = b._navigate_impl(self.goal)["run_id"]
+        handle = Mock(cancel_goal_async=Mock(side_effect=RuntimeError("cancel rejected")))
+        b._goal_handles[run] = handle
+        b._goal_states[run]["state"] = "RUNNING"
+        self.reading = None
+        b._interrupt_old_goals()
+        self.reading = (0, 1, 1)
+        b._goal_states[run]["cancel_retry_at"] = 0
+        b._interrupt_old_goals()
+        self.assertEqual(handle.cancel_goal_async.call_count, 2)
+        b._result_cb(Mock(result=lambda: SimpleNamespace(status=4)), run)
+        self.assertEqual(b._status_impl(run)["state"], "FAILED")
 
     def test_result_received_before_interruption_cannot_overwrite_failure(self):
         b = self.bridge
